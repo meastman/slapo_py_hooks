@@ -15,6 +15,7 @@
 struct PyObject;
 #endif
 #ifdef SIDE_PYTHON
+struct BerValue;
 struct Modifications;
 #endif
 
@@ -27,14 +28,17 @@ struct Modification {
   int flags;
 };
 
-struct ModificationOp {
-  std::string dn;
-  std::vector<Modification> mods;
+class ModificationOp {
+ public:
+  void FromLdap(const BerValue& dn, const BerValue& auth_dn, const Modifications* mods);
+  int ToLdap(Modifications** mods, std::string* error);
+  bool FromPython(PyObject* mods);
+  void ToPython(PyObject** dn, PyObject** auth_dn, PyObject** mods);
 
-  void FromLdap(const Modifications* mod_list);
-  int ToLdap(Modifications** mod_list, std::string* error);
-  bool FromPython(PyObject* py_mods);
-  bool ToPython(PyObject* py_mods);
+ private:
+  std::string dn_;
+  std::string auth_dn_;
+  std::vector<Modification> mods_;
 };
 
 void LogFromPython(const std::string& message);

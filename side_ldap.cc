@@ -38,8 +38,7 @@ void String2Bv(const string& src, BerValue* dst) {
   if (src.empty()) {
     dst->bv_val = NULL;
   } else {
-    dst->bv_val = (char*) malloc(src.size());
-    assert(dst->bv_val != NULL);
+    dst->bv_val = (char*) ch_malloc(src.size());
     memcpy(dst->bv_val, src.data(), src.size());
   }
 }
@@ -94,10 +93,9 @@ int ModifyHook(Operation *op, SlapReply *rs) {
   assert(info != NULL);
 
   ModificationOp m2;
-  m2.FromLdap(op->orm_modlist);
+  m2.FromLdap(op->o_req_dn, op->o_authz.sai_ndn, op->orm_modlist);
   slap_mods_free(op->orm_modlist, 1);
   op->orm_modlist = NULL;
-  m2.dn = Bv2String(op->o_req_dn);
 
   string error;
   int status = info->Update(&m2, &error);
@@ -131,9 +129,13 @@ int DestroyHook(BackendDB* be, ConfigReply* cr) {
 
 namespace slapo_py_update_hook {
 
-void ModificationOp::FromLdap(const Modifications* mod_list) {
-  for (const Modifications* in_mod = mod_list;
-       in_mod != NULL; in_mod = in_mod->sml_next) {
+void ModificationOp::FromLdap(
+    const BerValue& dn, const BerValue& auth_dn, const Modifications* mods) {
+  dn_ = Bv2String(dn);
+  auth_dn_ = Bv2String(auth_dn);
+
+  for (const Modifications* in_mod = mods; in_mod != NULL;
+       in_mod = in_mod->sml_next) {
     Modification out_mod;
 
     assert(in_mod->sml_desc != NULL);
@@ -143,16 +145,17 @@ void ModificationOp::FromLdap(const Modifications* mod_list) {
     }
     out_mod.op = in_mod->sml_op;
     out_mod.flags = in_mod->sml_flags;
-    mods.push_back(out_mod);
+    mods_.push_back(out_mod);
   }
 }
 
-int ModificationOp::ToLdap(Modifications** mod_list, string* error) {
-  for (vector<Modification>::const_iterator in_mod = mods.begin();
-       in_mod != mods.end(); ++in_mod) {
-    Modifications* out_mod = (Modifications*) calloc(1, sizeof(Modifications));
-    *mod_list = out_mod;
-    mod_list = &out_mod->sml_next;
+int ModificationOp::ToLdap(Modifications** mods, string* error) {
+  for (vector<Modification>::const_iterator in_mod = mods_.begin();
+       in_mod != mods_.end(); ++in_mod) {
+    Modifications* out_mod = (Modifications*) ch_calloc(
+        1, sizeof(Modifications));
+    *mods = out_mod;
+    mods = &out_mod->sml_next;
 
     BerValue name;
     name.bv_len = in_mod->name.size();
@@ -169,7 +172,7 @@ int ModificationOp::ToLdap(Modifications** mod_list, string* error) {
     out_mod->sml_op = in_mod->op;
     out_mod->sml_flags = in_mod->flags;
     out_mod->sml_numvals = in_mod->values.size();
-    out_mod->sml_values = (BerValue*) calloc(
+    out_mod->sml_values = (BerValue*) ch_calloc(
         in_mod->values.size() + 1, sizeof(BerValue));
     for (size_t i = 0; i < in_mod->values.size(); i++) {
       String2Bv(in_mod->values[i], &out_mod->sml_values[i]);

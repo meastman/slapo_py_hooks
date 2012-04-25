@@ -131,12 +131,12 @@ class GilHolder {
 
 namespace slapo_py_update_hook {
 
-bool ModificationOp::FromPython(PyObject* py_mods) {
-  mods.clear();
+bool ModificationOp::FromPython(PyObject* mods) {
+  mods_.clear();
   PyObjectOwner owner;
-  Py_ssize_t num_mods = PyList_Size(py_mods);
+  Py_ssize_t num_mods = PyList_Size(mods);
   for (Py_ssize_t i = 0; i < num_mods; i++) {
-    PyObject* py_mod = PyList_GetItem(py_mods, i);
+    PyObject* py_mod = PyList_GetItem(mods, i);
     if (!PyTuple_CheckExact(py_mod) || PyTuple_Size(py_mod) != 4) {
       LogFromPython(
           "Invalid modification (mods should only contain len=4-tuples)");
@@ -178,16 +178,20 @@ bool ModificationOp::FromPython(PyObject* py_mods) {
       return false;
     }
 
-    mods.push_back(mod);
+    mods_.push_back(mod);
   }
 
   return true;
 }
 
-bool ModificationOp::ToPython(PyObject* py_mods) {
+void ModificationOp::ToPython(PyObject** dn, PyObject** auth_dn, PyObject** mods) {
+  *dn = PyStrFromStr(dn_);
+  *auth_dn = PyStrFromStr(auth_dn_);
+  *mods = PyList_New(0);
+
   PyObjectOwner owner;
-  for (vector<Modification>::const_iterator mod = mods.begin();
-       mod != mods.end(); ++mod) {
+  for (vector<Modification>::const_iterator mod = mods_.begin();
+       mod != mods_.end(); ++mod) {
     PyObject* py_mod = owner.Own(PyTuple_New(4));
     PyTuple_SetItem(py_mod, 0, PyStrFromStr(mod->name));
 
@@ -201,10 +205,8 @@ bool ModificationOp::ToPython(PyObject* py_mods) {
     PyTuple_SetItem(py_mod, 2, PyInt_FromLong(mod->op));
     PyTuple_SetItem(py_mod, 3, PyInt_FromLong(mod->flags));
 
-    PyList_Append(py_mods, py_mod);
+    PyList_Append(*mods, py_mod);
   }
-
-  return true;
 }
 
 bool GlobalInit(const map<string, int>& new_py_consts) {
@@ -269,16 +271,19 @@ int InstanceInfo::Update(
     ModificationOp* op, string* error) {
   assert(py_module_ != NULL);
   GilHolder gil_holder;
-  PyObjectOwner owner;
-  PyObject* py_mods = owner.Own(PyList_New(0));
 
-  if (!op->ToPython(py_mods)) {
-    return 0x50;  // LDAP_OTHER
-  }
+  PyObjectOwner owner;
+  PyObject* dn = NULL;
+  PyObject* auth_dn = NULL;
+  PyObject* mods = NULL;
+  op->ToPython(&dn, &auth_dn, &mods);
+  owner.Own(dn);
+  owner.Own(auth_dn);
+  owner.Own(mods);
 
   PyObject* result = owner.Own(PyObject_CallMethodObjArgs(
       py_module_, owner.Own(PyStrFromStr(function_name_)),
-      owner.Own(PyStrFromStr(op->dn)), py_mods, NULL));
+      dn, auth_dn, mods, NULL));
   if (result == NULL) {
     LogPyExc();
     return 0x50;  // LDAP_OTHER
@@ -299,7 +304,7 @@ int InstanceInfo::Update(
     }
   }
 
-  if (!op->FromPython(py_mods)) {
+  if (!op->FromPython(mods)) {
     return 0x50;  // LDAP_OTHER
   }
 

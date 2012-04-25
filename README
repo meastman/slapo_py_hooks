@@ -23,8 +23,9 @@ Hooks:
 - Your hook function is called *before* any ACL checks. Be careful!
 - Your function should be named Update unless you override py_function in
   slapd.conf
-- Your function should take 2 arguments: dn and modifications.
+- Your function should take 3 arguments: dn, auth_dn, and modifications.
   - dn is a string containing the DN of the entry being modified.
+  - auth_dn is a string containing the DN of the authenticated user.
   - modifications is a list of tuples, each of which contains 4 elements:
     - name (a string containing the attribute name)
     - values (a list of strings containing values to add/remove)

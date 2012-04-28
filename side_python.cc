@@ -21,6 +21,7 @@ using slapo_py_update_hook::ModificationOp;
 namespace {
 PyObject* traceback_mod = NULL;
 PyObject* op_type = NULL;
+PyObject* mod_type = NULL;
 map<string, int>* py_consts = NULL;
 
 void LogPyExc();
@@ -156,15 +157,16 @@ bool ModificationOp::FromPython(PyObject* py_op) {
   Py_ssize_t num_mods = PyList_Size(mods);
   for (Py_ssize_t i = 0; i < num_mods; i++) {
     PyObject* py_mod = PyList_GetItem(mods, i);
-    if (!PyTuple_CheckExact(py_mod) || PyTuple_Size(py_mod) != 4) {
+    if (PyObject_Size(py_mod) != 4) {
       LogFromPython(
-          "Invalid modification (mods should only contain len=4-tuples)");
+          "Invalid modification (mods should only contain len-4-tuples or "
+          "Modification namedtuples)");
       return false;
     }
 
     Modification mod;
 
-    PyObject* py_name = PyTuple_GetItem(py_mod, 0);
+    PyObject* py_name = owner.Own(PySequence_GetItem(py_mod, 0));
     if (!PyString_CheckExact(py_name)) {
       LogFromPython("Invalid modification (element 0 should be a string)");
       return false;
@@ -172,7 +174,7 @@ bool ModificationOp::FromPython(PyObject* py_op) {
     mod.name = StrFromPyStr(py_name);
 
     PyObject* iterator = owner.Own(PyObject_GetIter(
-        PyTuple_GetItem(py_mod, 1)));
+        owner.Own(PySequence_GetItem(py_mod, 1))));
     if (iterator == NULL) {
       LogPyExc();
       return false;
@@ -191,8 +193,10 @@ bool ModificationOp::FromPython(PyObject* py_op) {
       return false;
     }
 
-    if (!PyIntOrLongAsInt(PyTuple_GetItem(py_mod, 2), &mod.op) ||
-        !PyIntOrLongAsInt(PyTuple_GetItem(py_mod, 3), &mod.flags)) {
+    if (!PyIntOrLongAsInt(owner.Own(
+            PySequence_GetItem(py_mod, 2)), &mod.op) ||
+        !PyIntOrLongAsInt(owner.Own(
+            PySequence_GetItem(py_mod, 3)), &mod.flags)) {
       LogPyExc();
       return false;
     }
@@ -220,19 +224,19 @@ PyObject* ModificationOp::ToPython() {
   PyObject* mods = owner.Own(PyList_New(0));
   for (vector<Modification>::const_iterator mod = mods_.begin();
        mod != mods_.end(); ++mod) {
-    PyObject* py_mod = owner.Own(PyTuple_New(4));
-    PyTuple_SetItem(py_mod, 0, PyStrFromStr(mod->name));
-
     PyObject* py_values = owner.Own(PyList_New(0));
     for (vector<string>::const_iterator value = mod->values.begin();
          value != mod->values.end(); ++value) {
       PyList_Append(py_values, owner.Own(PyStrFromStr(*value)));
     }
-    PyTuple_SetItem(py_mod, 1, InlineInc(py_values));
 
-    PyTuple_SetItem(py_mod, 2, PyInt_FromLong(mod->op));
-    PyTuple_SetItem(py_mod, 3, PyInt_FromLong(mod->flags));
-
+    PyObject* py_mod = owner.Own(PyObject_CallFunctionObjArgs(
+        mod_type, owner.Own(PyStrFromStr(mod->name)), py_values,
+        owner.Own(PyInt_FromLong(mod->op)),
+        owner.Own(PyInt_FromLong(mod->flags)), NULL));
+    if (py_mod == NULL) {
+      return py_mod;
+    }
     PyList_Append(mods, py_mod);
   }
 
@@ -264,13 +268,20 @@ bool GlobalInit(const map<string, int>& new_py_consts) {
   if (owner.Own(PyRun_String(
       "import collections\n"
       "op_type = collections.namedtuple(\n"
-      "'ModificationOp', 'dn,auth_dn,entry,modifications')\n",
+      "'ModificationOp', 'dn,auth_dn,entry,modifications')\n"
+      "mod_type = collections.namedtuple(\n"
+      "'Modification', 'name,values,op,flags')\n",
       Py_file_input, globals, locals)) == NULL) {
     LogPyExc();
     return false;
   }
   op_type = InlineInc(PyDict_GetItemString(locals, "op_type"));
   if (op_type == NULL) {
+    LogPyExc();
+    return false;
+  }
+  mod_type = InlineInc(PyDict_GetItemString(locals, "mod_type"));
+  if (mod_type == NULL) {
     LogPyExc();
     return false;
   }
@@ -303,6 +314,8 @@ bool InstanceInfo::Open() {
   }
   PyModule_AddObject(
       mod, "__builtins__", InlineInc(PyEval_GetBuiltins()));
+  PyModule_AddObject(
+      mod, "Modification", InlineInc(mod_type));
   PyObject* locals = owner.Own(PyDict_New());
   PyObject* result = owner.Own(PyRun_FileEx(
       fp, filename_.c_str(), Py_file_input, PyModule_GetDict(mod), locals, 1));

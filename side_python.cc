@@ -20,6 +20,7 @@ using slapo_py_update_hook::ModificationOp;
 
 namespace {
 PyObject* traceback_mod = NULL;
+PyObject* op_type = NULL;
 map<string, int>* py_consts = NULL;
 
 void LogPyExc();
@@ -83,6 +84,9 @@ void LogPyExc() {
   PyObject* exc_tb = NULL;
   PyErr_Fetch(&exc_type, &exc_obj, &exc_tb);
   PyErr_NormalizeException(&exc_type, &exc_obj, &exc_tb);
+  if (exc_tb == NULL) {
+    exc_tb = InlineInc(Py_None);
+  }
 
   PyObjectOwner owner;
   PyObject* result = owner.Own(PyObject_CallMethodObjArgs(
@@ -127,13 +131,28 @@ class GilHolder {
   DISALLOW_COPY_AND_ASSIGN(GilHolder);
 };
 
+class GilReleaser {
+ public:
+  GilReleaser() { }
+  ~GilReleaser() { PyEval_SaveThread(); }
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(GilReleaser);
+};
+
 }  // anonymous namespace
 
 namespace slapo_py_update_hook {
 
-bool ModificationOp::FromPython(PyObject* mods) {
+bool ModificationOp::FromPython(PyObject* py_op) {
   mods_.clear();
   PyObjectOwner owner;
+  PyObject* mods = owner.Own(PyObject_GetAttrString(py_op, "modifications"));
+  if (mods == NULL) {
+    LogPyExc();
+    return false;
+  }
+
   Py_ssize_t num_mods = PyList_Size(mods);
   for (Py_ssize_t i = 0; i < num_mods; i++) {
     PyObject* py_mod = PyList_GetItem(mods, i);
@@ -184,12 +203,21 @@ bool ModificationOp::FromPython(PyObject* mods) {
   return true;
 }
 
-void ModificationOp::ToPython(PyObject** dn, PyObject** auth_dn, PyObject** mods) {
-  *dn = PyStrFromStr(dn_);
-  *auth_dn = PyStrFromStr(auth_dn_);
-  *mods = PyList_New(0);
-
+PyObject* ModificationOp::ToPython() {
   PyObjectOwner owner;
+
+  PyObject* entry = owner.Own(PyDict_New());
+  for (map<string, vector<string> >::const_iterator attr = entry_.begin();
+       attr != entry_.end(); ++attr) {
+    PyObject* values = owner.Own(PyList_New(0));
+    for (vector<string>::const_iterator value = attr->second.begin();
+         value != attr->second.end(); ++value) {
+      PyList_Append(values, owner.Own(PyStrFromStr(*value)));
+    }
+    PyDict_SetItem(entry, owner.Own(PyStrFromStr(attr->first)), values);
+  }
+
+  PyObject* mods = owner.Own(PyList_New(0));
   for (vector<Modification>::const_iterator mod = mods_.begin();
        mod != mods_.end(); ++mod) {
     PyObject* py_mod = owner.Own(PyTuple_New(4));
@@ -205,21 +233,48 @@ void ModificationOp::ToPython(PyObject** dn, PyObject** auth_dn, PyObject** mods
     PyTuple_SetItem(py_mod, 2, PyInt_FromLong(mod->op));
     PyTuple_SetItem(py_mod, 3, PyInt_FromLong(mod->flags));
 
-    PyList_Append(*mods, py_mod);
+    PyList_Append(mods, py_mod);
   }
+
+  return PyObject_CallFunctionObjArgs(
+      op_type, owner.Own(PyStrFromStr(dn_)), owner.Own(PyStrFromStr(auth_dn_)),
+      entry, mods, NULL);
 }
 
 bool GlobalInit(const map<string, int>& new_py_consts) {
   py_consts = new map<string, int>(new_py_consts);
   Py_InitializeEx(0);
   PyEval_InitThreads();
+  GilReleaser gil_releaser;
+
   traceback_mod = PyImport_ImportModule("traceback");
   if (traceback_mod == NULL) {
     LogPyExc();
-    PyEval_SaveThread();  // release GIL
     return false;
   }
-  PyEval_SaveThread();  // release GIL
+
+  // This is nasty. Ideally we'd use PyImport_ImportModule and
+  // PyObject_CallMethod or PyObject_CallMethodObjArgs, but the namedtuple
+  // function looks at the caller's stack frame, which wouldn't exist and
+  // would raise an exception.
+  PyObjectOwner owner;
+  PyObject* globals = owner.Own(PyDict_New());
+  PyDict_SetItemString(globals, "__builtins__", PyEval_GetBuiltins());
+  PyObject* locals = owner.Own(PyDict_New());
+  if (owner.Own(PyRun_String(
+      "import collections\n"
+      "op_type = collections.namedtuple(\n"
+      "'ModificationOp', 'dn,auth_dn,entry,modifications')\n",
+      Py_file_input, globals, locals)) == NULL) {
+    LogPyExc();
+    return false;
+  }
+  op_type = InlineInc(PyDict_GetItemString(locals, "op_type"));
+  if (op_type == NULL) {
+    LogPyExc();
+    return false;
+  }
+
   return true;
 }
 
@@ -273,17 +328,14 @@ int InstanceInfo::Update(
   GilHolder gil_holder;
 
   PyObjectOwner owner;
-  PyObject* dn = NULL;
-  PyObject* auth_dn = NULL;
-  PyObject* mods = NULL;
-  op->ToPython(&dn, &auth_dn, &mods);
-  owner.Own(dn);
-  owner.Own(auth_dn);
-  owner.Own(mods);
+  PyObject* py_op = owner.Own(op->ToPython());
+  if (py_op == NULL) {
+    LogPyExc();
+    return 0x50;  // LDAP_OTHER
+  }
 
   PyObject* result = owner.Own(PyObject_CallMethodObjArgs(
-      py_module_, owner.Own(PyStrFromStr(function_name_)),
-      dn, auth_dn, mods, NULL));
+      py_module_, owner.Own(PyStrFromStr(function_name_)), py_op, NULL));
   if (result == NULL) {
     LogPyExc();
     return 0x50;  // LDAP_OTHER
@@ -304,7 +356,7 @@ int InstanceInfo::Update(
     }
   }
 
-  if (!op->FromPython(mods)) {
+  if (!op->FromPython(py_op)) {
     return 0x50;  // LDAP_OTHER
   }
 

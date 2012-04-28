@@ -93,9 +93,18 @@ int ModifyHook(Operation *op, SlapReply *rs) {
   assert(info != NULL);
 
   ModificationOp m2;
-  m2.FromLdap(op->o_req_dn, op->o_authz.sai_ndn, op->orm_modlist);
+  m2.FromLdap(op->o_req_ndn, op->o_authz.sai_ndn, op->orm_modlist);
   slap_mods_free(op->orm_modlist, 1);
   op->orm_modlist = NULL;
+
+  Entry* entry = NULL;
+  op->o_bd->bd_info = (BackendInfo*) on->on_info;
+  be_entry_get_rw(op, &op->o_req_ndn, NULL, NULL, 0, &entry);
+  if (entry) {
+    m2.AddEntry(entry);
+    be_entry_release_rw(op, entry, 0);
+  }
+  op->o_bd->bd_info = (BackendInfo*) on;
 
   string error;
   int status = info->Update(&m2, &error);
@@ -146,6 +155,17 @@ void ModificationOp::FromLdap(
     out_mod.op = in_mod->sml_op;
     out_mod.flags = in_mod->sml_flags;
     mods_.push_back(out_mod);
+  }
+}
+
+void ModificationOp::AddEntry(const Entry* entry) {
+  for (const Attribute* in_attr = entry->e_attrs; in_attr != NULL;
+       in_attr = in_attr->a_next) {
+    const string name = Bv2String(in_attr->a_desc->ad_cname);
+    vector<string>& attrs = entry_[name];
+    for (size_t i = 0; i < in_attr->a_numvals; i++) {
+      attrs.push_back(Bv2String(in_attr->a_vals[i]));
+    }
   }
 }
 

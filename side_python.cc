@@ -1,379 +1,207 @@
 #include <Python.h>
 
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
-
-#include <map>
+#include <cassert>
+#include <memory>
 #include <string>
-#include <vector>
 
-#define SIDE_PYTHON
 #include "slapo_py_update_hook.h"
+#include "cc_py_obj.h"
 
-using std::map;
 using std::string;
-using std::vector;
-using slapo_py_update_hook::LogFromPython;
-using slapo_py_update_hook::Modification;
-using slapo_py_update_hook::ModificationOp;
+using std::unique_ptr;
 
+namespace slapo_py_update_hook {
 namespace {
-PyObject* traceback_mod = NULL;
-PyObject* op_type = NULL;
-PyObject* mod_type = NULL;
-map<string, int>* py_consts = NULL;
 
-void LogPyExc();
-
-PyObject* InlineInc(PyObject* obj) {
-  Py_XINCREF(obj);
-  return obj;
-}
-
-template <typename IntType>
-bool PyIntOrLongAsInt(PyObject* py_int, IntType* cc_int) {
-  if (PyLong_CheckExact(py_int)) {
-    *cc_int = PyLong_AsLong(py_int);
-  } else {
-    *cc_int = PyInt_AsLong(py_int);
-  }
-  return PyErr_Occurred() == NULL;
-}
-
-class PyObjectOwner {
- public:
-  PyObjectOwner() { }
-  ~PyObjectOwner() {
-    for (vector<PyObject*>::const_iterator i = objs_.begin();
-         i != objs_.end(); ++i) {
-      Py_XDECREF(*i);
-    }
-  }
-
-  PyObject* Own(PyObject* obj) {
-    objs_.push_back(obj);
-    return obj;
-  }
-
- private:
-  vector<PyObject*> objs_;
-  DISALLOW_COPY_AND_ASSIGN(PyObjectOwner);
-};
-
-PyObject* PyStrFromStr(const string& str_in) {
-  return PyString_FromStringAndSize(str_in.data(), str_in.size());
-}
-
-string StrFromPyStr(PyObject* str_in) {
-  char* exc_str_data = NULL;
-  Py_ssize_t exc_str_len = 0;
-  PyString_AsStringAndSize(str_in, &exc_str_data, &exc_str_len);
-  return string(exc_str_data, exc_str_len);
-}
-
-void LogPyExc() {
-  assert(PyErr_Occurred());
-  if (traceback_mod == NULL) {
-    PyErr_Print();
-    PyErr_Clear();
-    return;
-  }
-
-  PyObject* exc_type = NULL;
-  PyObject* exc_obj = NULL;
-  PyObject* exc_tb = NULL;
-  PyErr_Fetch(&exc_type, &exc_obj, &exc_tb);
-  PyErr_NormalizeException(&exc_type, &exc_obj, &exc_tb);
-  if (exc_tb == NULL) {
-    exc_tb = InlineInc(Py_None);
-  }
-
-  PyObjectOwner owner;
-  PyObject* result = owner.Own(PyObject_CallMethodObjArgs(
-      traceback_mod, owner.Own(PyStrFromStr("format_exception")),
-      exc_type, exc_obj, exc_tb, NULL));
-  if (result == NULL) {
-    LogFromPython("Unable to format exception (traceback.format_exception)");
-    PyErr_Print();
-    PyErr_Restore(exc_type, exc_obj, exc_tb);
-    PyErr_Print();
-    PyErr_Clear();
-    return;
-  }
-
-  // py_result_str = ''.join(result)
-  PyObject* py_result_str = owner.Own(PyObject_CallMethodObjArgs(
-      owner.Own(PyStrFromStr("")), owner.Own(PyStrFromStr("join")),
-      result, NULL));
-  if (py_result_str == NULL || !PyString_CheckExact(py_result_str)) {
-    LogFromPython("Unable to format exception (str.join)");
-    PyErr_Print();
-    PyErr_Restore(exc_type, exc_obj, exc_tb);
-    PyErr_Print();
-    PyErr_Clear();
-    return;
-  }
-
-  Py_DECREF(exc_type);
-  Py_DECREF(exc_obj);
-  Py_DECREF(exc_tb);
-
-  LogFromPython(StrFromPyStr(py_result_str));
-}
+CCPyObj op_type;
+CCPyObj mod_type;
 
 class GilHolder {
- public:
-  GilHolder() : state_(PyGILState_Ensure()) { }
-  ~GilHolder() { PyGILState_Release(state_); }
+  public:
+    GilHolder() : state_(PyGILState_Ensure()) {}
+    GilHolder(const GilHolder &) = delete;
+    ~GilHolder() { PyGILState_Release(state_); }
+    void operator=(const GilHolder &) = delete;
 
- private:
-  PyGILState_STATE state_;
-  DISALLOW_COPY_AND_ASSIGN(GilHolder);
-};
-
-class GilReleaser {
- public:
-  GilReleaser() { }
-  ~GilReleaser() { PyEval_SaveThread(); }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(GilReleaser);
+  private:
+    PyGILState_STATE state_;
 };
 
 }  // anonymous namespace
 
-namespace slapo_py_update_hook {
+//
+// ModificationOp
+//
 
-bool ModificationOp::FromPython(PyObject* py_op) {
-  mods_.clear();
-  PyObjectOwner owner;
-  PyObject* mods = owner.Own(PyObject_GetAttrString(py_op, "modifications"));
-  if (mods == NULL) {
-    LogPyExc();
-    return false;
-  }
-
-  Py_ssize_t num_mods = PyList_Size(mods);
-  for (Py_ssize_t i = 0; i < num_mods; i++) {
-    PyObject* py_mod = PyList_GetItem(mods, i);
-    if (PyObject_Size(py_mod) != 4) {
-      LogFromPython(
-          "Invalid modification (mods should only contain len-4-tuples or "
-          "Modification namedtuples)");
-      return false;
+CCPyObj mod_op_to_python(ModificationOp &op) {
+    CCPyObj py_entry = CCPyObj::checked_steal(PyDict_New());
+    for (const auto &name_values : op.entry) {
+        CCPyObj values = CCPyObj::checked_steal(PyList_New(0));
+        for (const string &value : name_values.second) {
+            CCPyObj py_value{value};
+            PyList_Append(values.ref(), py_value.ref());
+        }
+        CCPyObj py_name{name_values.first};
+        PyDict_SetItem(py_entry.ref(), py_name.ref(), values.ref());
     }
 
-    Modification mod;
+    CCPyObj py_mods = CCPyObj::checked_steal(PyList_New(0));
+    for (const Modification &mod : op.mods) {
+        CCPyObj py_values = CCPyObj::checked_steal(PyList_New(0));
+        for (const string &value : mod.values) {
+            CCPyObj py_value{value};
+            PyList_Append(py_values.ref(), py_value.ref());
+        }
 
-    PyObject* py_name = owner.Own(PySequence_GetItem(py_mod, 0));
-    if (!PyString_CheckExact(py_name)) {
-      LogFromPython("Invalid modification (element 0 should be a string)");
-      return false;
-    }
-    mod.name = StrFromPyStr(py_name);
-
-    PyObject* iterator = owner.Own(PyObject_GetIter(
-        owner.Own(PySequence_GetItem(py_mod, 1))));
-    if (iterator == NULL) {
-      LogPyExc();
-      return false;
+        CCPyObj py_mod = mod_type(mod.name, py_values, mod.op, mod.flags);
+        PyList_Append(py_mods.ref(), py_mod.ref());
     }
 
-    PyObject* item;
-    while ((item = owner.Own(PyIter_Next(iterator))) != NULL) {
-      if (!PyString_CheckExact(item)) {
-        LogFromPython("Values must all be strings");
-        return false;
-      }
-      mod.values.push_back(StrFromPyStr(item));
-    }
-    if (PyErr_Occurred()) {
-      LogPyExc();
-      return false;
-    }
-
-    if (!PyIntOrLongAsInt(owner.Own(
-            PySequence_GetItem(py_mod, 2)), &mod.op) ||
-        !PyIntOrLongAsInt(owner.Own(
-            PySequence_GetItem(py_mod, 3)), &mod.flags)) {
-      LogPyExc();
-      return false;
-    }
-
-    mods_.push_back(mod);
-  }
-
-  return true;
+    return op_type(op.dn, op.auth_dn, py_entry, py_mods);
 }
 
-PyObject* ModificationOp::ToPython() {
-  PyObjectOwner owner;
+void mod_op_from_python(ModificationOp &op, CCPyObj py_op) {
+    op.mods.clear();
 
-  PyObject* entry = owner.Own(PyDict_New());
-  for (map<string, vector<string> >::const_iterator attr = entry_.begin();
-       attr != entry_.end(); ++attr) {
-    PyObject* values = owner.Own(PyList_New(0));
-    for (vector<string>::const_iterator value = attr->second.begin();
-         value != attr->second.end(); ++value) {
-      PyList_Append(values, owner.Own(PyStrFromStr(*value)));
+    CCPyObj mods = py_op.attr("modifications");
+    Py_ssize_t num_mods = mods.size();
+    for (Py_ssize_t i = 0; i < num_mods; i++) {
+        CCPyObj py_mod = mods.item(i);
+        if (py_mod.size() != 4) {
+            throw PyError{"Invalid modification (mods should only contain "
+                          "len-4-tuples or "
+                          "Modification namedtuples)"};
+        }
+
+        Modification mod;
+
+        mod.name = static_cast<string>(py_mod.item(0));
+
+        CCPyObj values = py_mod.item(1);
+        CCPyObj iterator =
+            CCPyObj::checked_steal(PyObject_GetIter(values.ref()));
+        CCPyObj item;
+        while ((item = CCPyObj::unchecked_steal(PyIter_Next(iterator.ref())))
+                   .ref() != nullptr) {
+            mod.values.push_back(item);
+        }
+
+        mod.op = py_mod.item(2);
+        mod.flags = py_mod.item(3);
+        op.mods.push_back(mod);
     }
-    PyDict_SetItem(entry, owner.Own(PyStrFromStr(attr->first)), values);
-  }
-
-  PyObject* mods = owner.Own(PyList_New(0));
-  for (vector<Modification>::const_iterator mod = mods_.begin();
-       mod != mods_.end(); ++mod) {
-    PyObject* py_values = owner.Own(PyList_New(0));
-    for (vector<string>::const_iterator value = mod->values.begin();
-         value != mod->values.end(); ++value) {
-      PyList_Append(py_values, owner.Own(PyStrFromStr(*value)));
-    }
-
-    PyObject* py_mod = owner.Own(PyObject_CallFunctionObjArgs(
-        mod_type, owner.Own(PyStrFromStr(mod->name)), py_values,
-        owner.Own(PyInt_FromLong(mod->op)),
-        owner.Own(PyInt_FromLong(mod->flags)), NULL));
-    if (py_mod == NULL) {
-      return py_mod;
-    }
-    PyList_Append(mods, py_mod);
-  }
-
-  return PyObject_CallFunctionObjArgs(
-      op_type, owner.Own(PyStrFromStr(dn_)), owner.Own(PyStrFromStr(auth_dn_)),
-      entry, mods, NULL);
 }
 
-bool GlobalInit(const map<string, int>& new_py_consts) {
-  py_consts = new map<string, int>(new_py_consts);
-  Py_InitializeEx(0);
-  PyEval_InitThreads();
-  GilReleaser gil_releaser;
+//
+// Misc
+//
 
-  traceback_mod = PyImport_ImportModule("traceback");
-  if (traceback_mod == NULL) {
-    LogPyExc();
-    return false;
-  }
+void init_python() {
+    Py_InitializeEx(0);
+    PyEval_InitThreads();
+    PyEval_SaveThread();
+    GilHolder gil_holder;
 
-  // This is nasty. Ideally we'd use PyImport_ImportModule and
-  // PyObject_CallMethod or PyObject_CallMethodObjArgs, but the namedtuple
-  // function looks at the caller's stack frame, which wouldn't exist and
-  // would raise an exception.
-  PyObjectOwner owner;
-  PyObject* globals = owner.Own(PyDict_New());
-  PyDict_SetItemString(globals, "__builtins__", PyEval_GetBuiltins());
-  PyObject* locals = owner.Own(PyDict_New());
-  if (owner.Own(PyRun_String(
-      "import collections\n"
-      "op_type = collections.namedtuple(\n"
-      "'ModificationOp', 'dn,auth_dn,entry,modifications')\n"
-      "mod_type = collections.namedtuple(\n"
-      "'Modification', 'name,values,op,flags')\n",
-      Py_file_input, globals, locals)) == NULL) {
-    LogPyExc();
-    return false;
-  }
-  op_type = InlineInc(PyDict_GetItemString(locals, "op_type"));
-  if (op_type == NULL) {
-    LogPyExc();
-    return false;
-  }
-  mod_type = InlineInc(PyDict_GetItemString(locals, "mod_type"));
-  if (mod_type == NULL) {
-    LogPyExc();
-    return false;
-  }
+    init_cc_py_obj();
 
-  return true;
+    // Ideally we'd use PyImport_ImportModule and PyObject_CallMethod or
+    // PyObject_CallMethodObjArgs, but the namedtuple function looks at the
+    // caller's stack frame, which wouldn't exist and would raise an exception.
+    CCPyObj globals = CCPyObj::checked_steal(PyDict_New());
+    PyDict_SetItemString(globals.ref(), "__builtins__", PyEval_GetBuiltins());
+    CCPyObj locals = CCPyObj::checked_steal(PyDict_New());
+
+    CCPyObj::checked_steal(
+        PyRun_String("import collections\n"
+                     "op_type = collections.namedtuple(\n"
+                     "'ModificationOp', 'dn,auth_dn,entry,modifications')\n"
+                     "mod_type = collections.namedtuple(\n"
+                     "'Modification', 'name,values,op,flags')\n",
+                     Py_file_input, globals.ref(), locals.ref()));
+    op_type = locals.item("op_type");
+    mod_type = locals.item("mod_type");
 }
 
-InstanceInfo::~InstanceInfo() {
-  Py_XDECREF(py_module_);
-}
+//
+// InstanceInfo
+//
 
-bool InstanceInfo::Open() {
-  if (filename_.empty()) {
-    LogFromPython("No py_filename specified in config");
-    return false;
-  }
-  FILE* fp = fopen(filename_.c_str(), "r");
-  if (fp == NULL) {
-    LogFromPython("Unable to open file " + filename_ + ": " + strerror(errno));
-    return false;
-  }
+class InstanceInfoImpl : public InstanceInfo {
+  public:
+    InstanceInfoImpl() : function_name_("update") {}
+    virtual ~InstanceInfoImpl() {}
 
-  GilHolder gil_holder;
-  PyObjectOwner owner;
-  PyObject* mod = owner.Own(PyModule_New("update_hook"));
-  PyModule_AddStringConstant(mod, "__file__", filename_.c_str());
-  for (map<string, int>::const_iterator i = py_consts->begin();
-       i != py_consts->end(); ++i) {
-    PyModule_AddIntConstant(mod, i->first.c_str(), i->second);
-  }
-  PyModule_AddObject(
-      mod, "__builtins__", InlineInc(PyEval_GetBuiltins()));
-  PyModule_AddObject(
-      mod, "Modification", InlineInc(mod_type));
-  PyObject* locals = owner.Own(PyDict_New());
-  PyObject* result = owner.Own(PyRun_FileEx(
-      fp, filename_.c_str(), Py_file_input, PyModule_GetDict(mod), locals, 1));
-  if (result == NULL) {
-    LogPyExc();
-    return false;
-  }
-  PyDict_Update(PyModule_GetDict(mod), locals);
+    void set_filename(const std::string &name) override { filename_ = name; }
+    void set_function_name(const std::string &name) override {
+        function_name_ = name;
+    }
+    void open() override;
+    int update(ModificationOp &op, std::string &error) override;
 
-  if (!PyObject_HasAttrString(mod, function_name_.c_str())) {
-    LogFromPython("File " + filename_ + " is missing function " +
-                  function_name_);
-    return false;
-  }
+  private:
+    std::string filename_;
+    std::string function_name_;
+    CCPyObj py_module_;
+};
 
-  py_module_ = InlineInc(mod);
-  return true;
-}
-
-int InstanceInfo::Update(
-    ModificationOp* op, string* error) {
-  assert(py_module_ != NULL);
-  GilHolder gil_holder;
-
-  PyObjectOwner owner;
-  PyObject* py_op = owner.Own(op->ToPython());
-  if (py_op == NULL) {
-    LogPyExc();
-    return 0x50;  // LDAP_OTHER
-  }
-
-  PyObject* result = owner.Own(PyObject_CallMethodObjArgs(
-      py_module_, owner.Own(PyStrFromStr(function_name_)), py_op, NULL));
-  if (result == NULL) {
-    LogPyExc();
-    return 0x50;  // LDAP_OTHER
-  }
-
-  if (result != Py_None) {
-    int status;
-    if (!PyTuple_CheckExact(result) || PyTuple_Size(result) != 2 ||
-        !PyIntOrLongAsInt(PyTuple_GetItem(result, 0), &status) ||
-        !PyString_CheckExact(PyTuple_GetItem(result, 1))) {
-      LogFromPython("Result must be None or (int, str)");
-      return false;
+void InstanceInfoImpl::open() {
+    if (filename_.empty()) {
+        throw PyError{"No py_filename specified in config"};
     }
 
-    if (status != 0) {
-      *error = StrFromPyStr(PyTuple_GetItem(result, 1));
-      return status;
+    unique_ptr<FILE, decltype(&fclose)> fp{nullptr, &fclose};
+    fp.reset(fopen(filename_.c_str(), "r"));
+    if (!fp) {
+        throw PyError{"Unable to open file " + filename_ + ": " +
+                      strerror(errno)};
     }
-  }
 
-  if (!op->FromPython(py_op)) {
-    return 0x50;  // LDAP_OTHER
-  }
+    GilHolder gil_holder;
+    CCPyObj mod = CCPyObj::checked_steal(PyModule_New("update_hook"));
+    PyModule_AddStringConstant(mod.ref(), "__file__", filename_.c_str());
+    for (const auto &name_value : py_consts) {
+        PyModule_AddIntConstant(mod.ref(), name_value.first.c_str(),
+                                name_value.second);
+    }
+    CCPyObj builtins = CCPyObj::checked_borrow(PyEval_GetBuiltins());
+    PyModule_AddObject(mod.ref(), "__builtins__", builtins.new_ref());
+    PyModule_AddObject(mod.ref(), "Modification", mod_type.new_ref());
+    CCPyObj locals = CCPyObj::checked_steal(PyDict_New());
+    CCPyObj::checked_steal(
+        PyRun_FileEx(fp.get(), filename_.c_str(), Py_file_input,
+                     PyModule_GetDict(mod.ref()), locals.ref(), 0));
+    PyDict_Update(PyModule_GetDict(mod.ref()), locals.ref());
 
-  return 0;  // LDAP_SUCCESS
+    if (!PyObject_HasAttrString(mod.ref(), function_name_.c_str())) {
+        throw PyError{"File " + filename_ + " is missing function " +
+                      function_name_};
+    }
+
+    py_module_ = mod;
 }
+
+int InstanceInfoImpl::update(ModificationOp &op, string &error) {
+    assert(py_module_.ref());
+    GilHolder gil_holder;
+
+    CCPyObj py_op = mod_op_to_python(op);
+    CCPyObj result = py_module_.attr(function_name_)(py_op);
+    if (result.ref() != Py_None) {
+        if (result.size() != 2) {
+            throw PyError{"Result must be None or (int, str)"};
+        }
+        int status = result.item(0);
+        if (status != 0) {
+            error = static_cast<string>(result.item(1));
+            return status;
+        }
+    }
+
+    mod_op_from_python(op, py_op);
+    return 0;  // LDAP_SUCCESS
+}
+
+// static
+InstanceInfo *InstanceInfo::create() { return new InstanceInfoImpl; }
 
 }  // namespace slapo_py_update_hook

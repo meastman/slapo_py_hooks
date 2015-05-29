@@ -22,7 +22,7 @@ in Python.
     containing the update hook. If `overlay py_update_hook` is specified, this
     directive is required.
   - `py_function SomeFunctionName` - specify an alternate function name for
-    the hook. The default is `Update`.
+    the hook. The default is `update`.
 
 ## Hooks
 
@@ -31,7 +31,7 @@ in Python.
   - Various openldap constants, including: `LDAP_MOD_ADD`, `LDAP_MOD_DELETE`,
     `LDAP_MOD_REPLACE`, `SLAP_MOD_INTERNAL`, and `SLAP_MOD_MANAGING`
 - Your hook function is called *before* any ACL checks. Be careful!
-- Your function should be named `Update` unless you override `py_function` in
+- Your function should be named `update` unless you override `py_function` in
   slapd.conf
 - Your function should take a single argument, an object with the following
   attributes:

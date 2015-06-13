@@ -3,6 +3,8 @@
 slapo\_py\_hooks is an openldap overlay which allows you to write update hooks
 in Python.
 
+Released under the MIT license.
+
 ## Building
 
 - You must have downloaded the openldap source, extracted it, and at least run

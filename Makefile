@@ -1,6 +1,4 @@
 PY_VERSION = $(shell python -c 'import sys; print "%d.%d" % sys.version_info[:2]')
-OPENLDAP_DIR = $(HOME)  # probably needs to be overridden!
-CXX = g++
 CXXFLAGS = -Wall -Werror -fPIC -std=c++11
 
 default: all

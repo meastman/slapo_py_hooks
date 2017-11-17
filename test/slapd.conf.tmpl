@@ -1,0 +1,15 @@
+include     /tmp/openldap/etc/openldap/schema/core.schema
+pidfile     /tmp/openldap/var/run/slapd.pid
+argsfile    /tmp/openldap/var/run/slapd.args
+moduleload  @BUILD_DIR@/py_update_hook.so
+
+database    mdb
+maxsize     1073741824
+suffix      "dc=example,dc=com"
+rootdn      "cn=Manager,dc=example,dc=com"
+rootpw      secret
+directory   /tmp/openldap/var/openldap-data
+index       objectClass eq
+
+overlay     py_update_hook
+py_filename @BUILD_DIR@/test/hook.py

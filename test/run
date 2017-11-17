@@ -1,0 +1,52 @@
+#!/bin/bash
+set -ex
+cd "$(dirname "$0")/.."
+
+slapd_pid=0
+
+cleanup() {
+  set +e
+  if (( slapd_pid )); then
+    echo "Killing slapd (pid $slapd_pid)"
+    kill $slapd_pid
+    slapd_pid=0
+  fi
+}
+trap cleanup EXIT
+
+uri="ldapi://%2ftmp%2fslapd.sock"
+
+PATH="/tmp/openldap/bin:$PATH"
+
+echo "Starting slapd"
+sed -e "s~@BUILD_DIR@~${PWD}~g" < test/slapd.conf.tmpl > test/slapd.conf
+mkdir -p /tmp/openldap/var/{log,openldap-data}
+/tmp/openldap/libexec/slapd -h "$uri" -f test/slapd.conf -d none &
+slapd_pid=$!
+echo "Started slapd (pid ${slapd_pid})"
+
+echo "Waiting for slapd to become available"
+while ! ldapwhoami -H "$uri" >/dev/null; do
+  if ! kill -0 $slapd_pid; then
+    echo "slapd died" >&2
+    slapd_pid=0
+    exit 1
+  fi
+  sleep 1
+done
+
+ldapmodify -x -D'cn=Manager,dc=example,dc=com' -w secret -H "$uri" <<EOF
+dn: dc=example,dc=com
+changeType: add
+objectClass: organization
+objectClass: dcObject
+o: example
+dc: example
+
+dn: dc=example,dc=com
+changeType: modify
+replace: o
+o: example2
+-
+
+EOF

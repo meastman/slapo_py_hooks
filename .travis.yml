@@ -9,6 +9,7 @@ install:
 script:
 - make clean
 - make OPENLDAP_DIR=/tmp/openldap/src PYTHON_BIN=$PYTHON_BIN
+- ./test/run
 
 env:
 - PYTHON_BIN=python

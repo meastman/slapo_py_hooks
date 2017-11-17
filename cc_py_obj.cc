@@ -3,6 +3,7 @@
 #include <cassert>
 #include <string>
 #include <vector>
+#include <execinfo.h>
 
 #include "slapo_py_update_hook.h"
 #include "cc_py_obj.h"
@@ -30,15 +31,23 @@ void init_cc_py_obj() {
     traceback_mod = CCPyObj::checked_steal(PyImport_ImportModule("traceback"));
 }
 
+#if PY_VERSION_HEX < 0x03000000
+#define SPH_PY_INT(suffix)   PyInt_ ## suffix
+#define SPH_PY_BYTES(suffix) PyString_ ## suffix
+#else
+#define SPH_PY_INT(suffix)   PyLong_ ## suffix
+#define SPH_PY_BYTES(suffix) PyBytes_ ## suffix
+#endif
+
 //
 // CCPyObj
 //
 
 CCPyObj::CCPyObj() : obj_{nullptr} {}
-CCPyObj::CCPyObj(long value) : obj_{PyInt_FromLong(value)} {}
-CCPyObj::CCPyObj(const char *str) : obj_{PyString_FromString(str)} {}
+CCPyObj::CCPyObj(long value) : obj_{SPH_PY_INT(FromLong)(value)} {}
+CCPyObj::CCPyObj(const char *str) : obj_{SPH_PY_BYTES(FromString)(str)} {}
 CCPyObj::CCPyObj(const string &str)
-    : obj_{PyString_FromStringAndSize(str.data(), str.size())} {}
+    : obj_{SPH_PY_BYTES(FromStringAndSize)(str.data(), str.size())} {}
 CCPyObj::CCPyObj(const CCPyObj &other) : obj_{other.obj_} { Py_XINCREF(obj_); }
 CCPyObj::~CCPyObj() { Py_XDECREF(obj_); }
 
@@ -83,8 +92,10 @@ CCPyObj::operator long() const {
         throw PyError{"Cannot cast nullptr to long"};
     } else if (PyLong_Check(obj_)) {
         result = PyLong_AsLong(obj_);
+#if PY_VERSION_HEX < 0x03000000
     } else if (PyInt_Check(obj_)) {
         result = PyInt_AsLong(obj_);
+#endif
     } else {
         CCPyObj repr = checked_steal(PyObject_Repr(obj_));
         throw PyError{"Cannot cast " + static_cast<string>(repr) + " to long"};
@@ -96,19 +107,31 @@ CCPyObj::operator long() const {
 CCPyObj::operator string() const {
     if (!obj_) {
         throw PyError{"Cannot cast nullptr to string"};
-    } else if (!PyString_Check(obj_)) {
+    } else if (!SPH_PY_BYTES(Check)(obj_)) {
         CCPyObj repr = checked_steal(PyObject_Repr(obj_));
         throw PyError{"Cannot cast " + static_cast<string>(repr) + " to string"};
     }
     char *exc_str_data = nullptr;
     Py_ssize_t exc_str_len = 0;
-    int result = PyString_AsStringAndSize(obj_, &exc_str_data, &exc_str_len);
+    int result = SPH_PY_BYTES(AsStringAndSize)(obj_, &exc_str_data, &exc_str_len);
     maybe_throw(result < 0);
     return string(exc_str_data, exc_str_len);
 }
 
+CCPyObj CCPyObj::native_str() const {
+#if PY_VERSION_HEX < 0x03000000
+    if (PyString_Check(obj_)) return *this;
+    if (PyUnicode_Check(obj_)) return checked_steal(PyUnicode_AsASCIIString(obj_));
+    throw PyError{"Object is not a str or unicode"};
+#else
+    if (PyBytes_Check(obj_)) return checked_steal(PyUnicode_FromEncodedObject(obj_, "ascii", NULL));
+    if (PyUnicode_Check(obj_)) return *this;
+    throw PyError{"Object is not a bytes or unicode"};
+#endif
+}
+
 CCPyObj CCPyObj::attr(CCPyObj name) const {
-    return checked_steal(PyObject_GetAttr(obj_, name.obj_));
+    return checked_steal(PyObject_GetAttr(obj_, name.native_str().obj_));
 }
 
 ssize_t CCPyObj::size() const {
@@ -142,6 +165,11 @@ void CCPyObj::maybe_throw(bool cond) {
     if (!traceback_mod.ref() || maybe_throw_depth > 1) {
         PyErr_Print();
         PyErr_Clear();
+
+        void* ips[100];
+        size_t size = backtrace(ips, 100);
+        backtrace_symbols_fd(ips, size, 2);
+
         throw PyError{"Unhandled exception"};
     }
 

@@ -3,7 +3,12 @@ language: cpp
 compiler: clang
 
 install:
-- wget -qO - http://misc.meastman.org/openldap/openldap-2.4.40-precise-623d20db19e3f1e893fa932cd1e2c2dd.tar.bz2 | tar -C /tmp -jx
+- wget -qO - https://home.meastman.org/openldap-builds/openldap-2.4.45-trusty-20171117-190151-a5637f4853f8130a3b253e87af1e48b8ce368f0e.tar.bz2 | tar -C /tmp/openldap -jx
 
 script:
-- make OPENLDAP_DIR=/tmp/openldap-2.4.40/src
+- make clean
+- make OPENLDAP_DIR=/tmp/openldap/src PYTHON_BIN=$PYTHON_BIN
+
+env:
+- PYTHON_BIN=python
+- PYTHON_BIN=python3

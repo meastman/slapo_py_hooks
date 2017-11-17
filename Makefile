@@ -1,4 +1,5 @@
-PY_VERSION = $(shell python -c 'import sys; print "%d.%d" % sys.version_info[:2]')
+PYTHON_BIN = python
+PY_VERSION = $(shell $(PYTHON_BIN) -c 'import sys; print("{0}.{1}".format(*sys.version_info))')
 CXXFLAGS = -Wall -Werror -fPIC -std=c++11
 
 default: all

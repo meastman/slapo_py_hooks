@@ -32,6 +32,7 @@ class CCPyObj {
     operator std::string() const;
 
     CCPyObj attr(CCPyObj name) const;
+    CCPyObj native_str() const;
     ssize_t size() const;
     CCPyObj item(int) const;
     CCPyObj item(const std::string &) const;

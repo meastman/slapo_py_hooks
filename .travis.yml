@@ -3,6 +3,7 @@ language: cpp
 compiler: clang
 
 install:
+- mkdir /tmp/openldap
 - wget -qO - https://home.meastman.org/openldap-builds/openldap-2.4.45-trusty-20171117-190151-a5637f4853f8130a3b253e87af1e48b8ce368f0e.tar.bz2 | tar -C /tmp/openldap -jx
 
 script:
